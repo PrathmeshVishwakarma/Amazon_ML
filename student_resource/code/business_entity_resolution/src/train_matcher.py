@@ -121,6 +121,9 @@ def main() -> None:
                          "e.g. after a crash or shutdown. Flags must match.")
     ap.add_argument("--log-every", type=int, default=50,
                     help="Print training logloss every N boosting rounds.")
+    ap.add_argument("--block-chunk", type=int, default=20000,
+                    help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM "
+                         "boxes to bound the intermediate matrix.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -174,7 +177,8 @@ def main() -> None:
     print("blocking train...", flush=True)
     s1tr = s1[s1["entity_id"].isin(set(tr_ids))]
     cand_tr = block_all(s1tr, s2, s3, top_k=args.top_k,
-                        max_features=args.max_features, min_df=args.min_df)
+                        max_features=args.max_features, min_df=args.min_df,
+                        chunk_size=args.block_chunk)
     print(f"train blocking recall={blocking_recall(cand_tr, gt):.4f}", flush=True)
 
     X, y, _ = build_rows(s1, s2, s3, gt, cand_tr, list(tr_ids))
@@ -183,7 +187,8 @@ def main() -> None:
     print("blocking val + scoring...", flush=True)
     s1v = s1[s1["entity_id"].isin(val_ids)]
     cand_v = block_all(s1v, s2, s3, top_k=args.top_k,
-                       max_features=args.max_features, min_df=args.min_df)
+                       max_features=args.max_features, min_df=args.min_df,
+                       chunk_size=args.block_chunk)
     print(f"val blocking recall={blocking_recall(cand_v, gt):.4f}", flush=True)
     Xv, yv, infov = build_rows(s1, s2, s3, gt, cand_v, list(val_ids))
 

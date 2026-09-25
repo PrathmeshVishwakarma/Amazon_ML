@@ -63,7 +63,7 @@ def block_shard(
         max_features=max_features, sublinear_tf=True,
     )
     try:
-        s23_mat = vec.fit_transform(s23["_block"].tolist())
+        s23_mat = vec.fit_transform(s23["_block"].tolist()).astype(np.float32)
     except ValueError:
         return out  # empty vocabulary
     if s23_mat.shape[1] == 0:
@@ -77,7 +77,7 @@ def block_shard(
     n_chunks = (len(blocks) + chunk_size - 1) // chunk_size
     for ci, start in enumerate(range(0, len(blocks), chunk_size)):
         ct0 = time.time()
-        chunk = vec.transform(blocks[start:start + chunk_size])
+        chunk = vec.transform(blocks[start:start + chunk_size]).astype(np.float32)
         scores = (chunk @ s23_mat.T).tocsr()
         idx, sco = _topk_per_row(scores, top_k)
         for j in range(idx.shape[0]):

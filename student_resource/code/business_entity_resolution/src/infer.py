@@ -43,6 +43,8 @@ def main() -> None:
                     help="TF-IDF vocab cap. Lower (e.g. 50000) to fit low-RAM boxes.")
     ap.add_argument("--min-df", type=int, default=2,
                     help="TF-IDF min document frequency. Raise (e.g. 5) on low-RAM boxes.")
+    ap.add_argument("--block-chunk", type=int, default=20000,
+                    help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM boxes.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -62,7 +64,8 @@ def main() -> None:
         chunk = s1.iloc[start:start + args.chunk_s1]
         print(f"block+score {start}/{len(s1)}...", flush=True)
         cand = block_all(chunk, s2, s3, top_k=args.top_k,
-                           max_features=args.max_features, min_df=args.min_df)
+                           max_features=args.max_features, min_df=args.min_df,
+                           chunk_size=args.block_chunk)
         for sid in chunk["entity_id"]:
             pairs = cand.get(str(sid), [])
             cand_rows[str(sid)] = [c for c, _ in pairs]
