@@ -1,0 +1,20 @@
+# Data (GBs) — never commit
+*.tsv
+student_resource/dataset/
+*.zip
+
+# Secrets — never commit
+*.pem
+*.key
+
+# Env / caches / logs
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Run artifacts (reproducible; resync via rsync, not git)
+models/
+output/
+*.log
+nohup.out
