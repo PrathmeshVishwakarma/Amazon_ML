@@ -59,6 +59,11 @@ def main() -> None:
                          "are always kept; rest is random distractors). "
                          "Local-only; use 0 on AWS for the full pool.")
     ap.add_argument("--neg-per-pos", type=int, default=4)
+    ap.add_argument("--max-features", type=int, default=300_000,
+                    help="TF-IDF vocab cap. Lower (e.g. 50000) to fit low-RAM boxes.")
+    ap.add_argument("--min-df", type=int, default=2,
+                    help="TF-IDF min document frequency. Raise (e.g. 5) to shrink "
+                         "the index on low-RAM boxes.")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -101,7 +106,8 @@ def main() -> None:
 
     print("blocking train...", flush=True)
     s1tr = s1[s1["entity_id"].isin(set(tr_ids))]
-    cand_tr = block_all(s1tr, s2, s3, top_k=args.top_k)
+    cand_tr = block_all(s1tr, s2, s3, top_k=args.top_k,
+                        max_features=args.max_features, min_df=args.min_df)
     print(f"train blocking recall={blocking_recall(cand_tr, gt):.4f}", flush=True)
 
     X, y, _ = build_rows(s1, s2, s3, gt, cand_tr, list(tr_ids))
@@ -124,7 +130,8 @@ def main() -> None:
 
     print("blocking val + scoring...", flush=True)
     s1v = s1[s1["entity_id"].isin(val_ids)]
-    cand_v = block_all(s1v, s2, s3, top_k=args.top_k)
+    cand_v = block_all(s1v, s2, s3, top_k=args.top_k,
+                       max_features=args.max_features, min_df=args.min_df)
     print(f"val blocking recall={blocking_recall(cand_v, gt):.4f}", flush=True)
     Xv, yv, infov = build_rows(s1, s2, s3, gt, cand_v, list(val_ids))
     pv = model.predict(Xv)

@@ -44,6 +44,7 @@ def block_shard(
     top_k: int = 30,
     chunk_size: int = 20000,
     max_features: int = 300_000,
+    min_df: int = 2,
     verbose: bool = True,
     shard_name: str = "",
 ) -> dict[str, list[tuple[str, float]]]:
@@ -58,7 +59,7 @@ def block_shard(
 
     t0 = time.time()
     vec = TfidfVectorizer(
-        analyzer="word", ngram_range=(1, 2), min_df=2,
+        analyzer="word", ngram_range=(1, 2), min_df=min_df,
         max_features=max_features, sublinear_tf=True,
     )
     try:
@@ -104,6 +105,7 @@ def block_all(
     top_k: int = 30,
     chunk_size: int = 20000,
     max_features: int = 300_000,
+    min_df: int = 2,
 ) -> dict[str, list[tuple[str, float]]]:
     """Country-sharded blocking over S2+S3. Covers every S1 id (empty if none)."""
     s23 = pd.concat([s2, s3], ignore_index=True)
@@ -116,7 +118,8 @@ def block_all(
         print(f"[block] shard country={country!r}: {len(g1)} queries vs "
               f"{len(pool)} candidates", flush=True)
         shard = block_shard(g1, pool, top_k=top_k, chunk_size=chunk_size,
-                            max_features=max_features, shard_name=str(country))
+                            max_features=max_features, min_df=min_df,
+                            shard_name=str(country))
         result.update(shard)
     return result
 
