@@ -36,42 +36,109 @@ def ckpt_paths(out: str) -> dict[str, str]:
     }
 
 
+def save_train_ckpt(out: str, cfg: dict, X: np.ndarray, y: np.ndarray,
+                    tr_ids: np.ndarray, val_ids: set) -> None:
+    """Phase-1 checkpoint: persisted BEFORE val blocking, so a death in the
+    val stage never discards train blocking + featurizing."""
+    p = ckpt_paths(out)
+    with open(p["config"], "w") as f:
+        json.dump(cfg, f, sort_keys=True)
+    np.savez_compressed(p["feat_train"], X=X, y=y)
+    np.save(p["tr_ids"], tr_ids)
+    np.save(p["val_ids"], np.array(sorted(val_ids)))
+    print("train-phase checkpoint saved.", flush=True)
+
+
 def save_ckpt(out: str, cfg: dict, X: np.ndarray, y: np.ndarray,
               Xv: np.ndarray, yv: np.ndarray,
               infov: list, tr_ids: np.ndarray, val_ids: set) -> None:
     p = ckpt_paths(out)
     with open(p["config"], "w") as f:
         json.dump(cfg, f, sort_keys=True)
-    np.savez_compressed(p["feat_train"], X=X, y=y)
+    if not os.path.exists(p["feat_train"]):
+        np.savez_compressed(p["feat_train"], X=X, y=y)
+        np.save(p["tr_ids"], tr_ids)
+        np.save(p["val_ids"], np.array(sorted(val_ids)))
     np.savez_compressed(p["feat_val"], X=Xv, y=yv)
     with open(p["info_val"], "wb") as f:
         pickle.dump(infov, f)
-    np.save(p["tr_ids"], tr_ids)
-    np.save(p["val_ids"], np.array(sorted(val_ids)))
     print("checkpoint saved.", flush=True)
 
 
-def load_ckpt(out: str, cfg: dict):
-    """Return (X, y, Xv, yv, infov, tr_ids, val_ids) or None if unusable."""
+def _cfg_ok(out: str, cfg: dict) -> bool:
     p = ckpt_paths(out)
-    if not all(os.path.exists(v) for v in p.values()):
+    if not os.path.exists(p["config"]):
+        return False
+    with open(p["config"]) as f:
+        ok = json.load(f) == cfg
+    if not ok:
+        print("checkpoint config differs from current flags; ignoring checkpoint.",
+              flush=True)
+    return ok
+
+
+def load_ckpt(out: str, cfg: dict):
+    """Full resume (train + val features) or None.
+
+    Returns (X, y, Xv, yv, infov, tr_ids, val_ids, phase) where phase is
+    'full', or ('train', X, y, tr_ids, val_ids) for a train-phase-only
+    checkpoint (val blocking still to do).
+    """
+    p = ckpt_paths(out)
+    if not _cfg_ok(out, cfg):
         return None
     try:
-        with open(p["config"]) as f:
-            if json.load(f) != cfg:
-                print("checkpoint config differs from current flags; ignoring checkpoint.",
-                      flush=True)
-                return None
-        tr = np.load(p["feat_train"])
-        va = np.load(p["feat_val"])
-        with open(p["info_val"], "rb") as f:
-            infov = pickle.load(f)
-        tr_ids = np.load(p["tr_ids"], allow_pickle=True)
-        val_ids = set(np.load(p["val_ids"], allow_pickle=True).tolist())
-        return tr["X"], tr["y"], va["X"], va["y"], infov, tr_ids, val_ids
+        if all(os.path.exists(p[k]) for k in ("feat_val", "info_val")):
+            tr = np.load(p["feat_train"])
+            va = np.load(p["feat_val"])
+            with open(p["info_val"], "rb") as f:
+                infov = pickle.load(f)
+            tr_ids = np.load(p["tr_ids"], allow_pickle=True)
+            val_ids = set(np.load(p["val_ids"], allow_pickle=True).tolist())
+            return ("full", tr["X"], tr["y"], va["X"], va["y"],
+                    infov, tr_ids, val_ids)
+        if all(os.path.exists(p[k]) for k in ("feat_train", "tr_ids", "val_ids")):
+            tr = np.load(p["feat_train"])
+            tr_ids = np.load(p["tr_ids"], allow_pickle=True)
+            val_ids = set(np.load(p["val_ids"], allow_pickle=True).tolist())
+            return ("train", tr["X"], tr["y"], tr_ids, val_ids)
+        return None
     except Exception as e:  # corrupt/incomplete write -> recompute cleanly
         print(f"checkpoint unreadable ({e}); recomputing.", flush=True)
         return None
+
+
+def _sampled_pool(s2, s3, gt, keep_s1: set, max_s23: int, seed: int):
+    """Cap S2+S3 pool keeping every true match of keep_s1 (local iteration)."""
+    need: set[str] = set()
+    for sid in keep_s1:
+        need.update(gt.get(str(sid), set()))
+    s2_need = {i for i in need if i.startswith("S2-")}
+    s3_need = {i for i in need if i.startswith("S3-")}
+    half = max_s23 // 2
+    s2_extra = s2[~s2["entity_id"].isin(s2_need)].sample(
+        n=max(0, min(half - len(s2_need), len(s2))), random_state=seed)
+    s3_extra = s3[~s3["entity_id"].isin(s3_need)].sample(
+        n=max(0, min(half - len(s3_need), len(s3))), random_state=seed)
+    s2 = pd.concat([s2[s2["entity_id"].isin(s2_need)], s2_extra], ignore_index=True)
+    s3 = pd.concat([s3[s3["entity_id"].isin(s3_need)], s3_extra], ignore_index=True)
+    print(f"sampled pool S2={len(s2)} S3={len(s3)}", flush=True)
+    return s2, s3
+
+
+def do_val_stage(args, cfg, gt, s1, s2, s3, X, y, tr_ids, val_ids):
+    print("blocking val + scoring...", flush=True)
+    s1v = s1[s1["entity_id"].isin(set(val_ids))]
+    cand_v = block_all(s1v, s2, s3, top_k=args.top_k,
+                       max_features=args.max_features, min_df=args.min_df,
+                       chunk_size=args.block_chunk,
+                       use_zip_block=args.use_zip_block, zip_cap=args.zip_cap)
+    print(f"val blocking recall={blocking_recall(cand_v, gt):.4f}", flush=True)
+    Xv, yv, infov = build_rows(s1, s2, s3, gt, cand_v, list(val_ids))
+
+    save_ckpt(args.out, cfg, X, y, Xv, yv, infov,
+              np.array(tr_ids), set(val_ids))
+    return train_and_score(args, gt, X, y, Xv, yv, infov, tr_ids, val_ids)
 
 
 def build_rows(s1, s2, s3, gt, candidates, s1_ids):
@@ -145,10 +212,21 @@ def main() -> None:
     gt = load_ground_truth(f"{args.train_dir}/train_ground_truth.tsv")
     if args.resume:
         hit = load_ckpt(args.out, cfg)
-        if hit is not None:
+        if hit is not None and hit[0] == "full":
+            _, X, y, Xv, yv, infov, tr_ids, val_ids = hit
             print("resuming from checkpoint (blocking + features skipped).", flush=True)
-            X, y, Xv, yv, infov, tr_ids, val_ids = hit
             return train_and_score(args, gt, X, y, Xv, yv, infov, tr_ids, val_ids)
+        if hit is not None and hit[0] == "train":
+            _, X, y, tr_ids, val_ids = hit
+            print("resuming from train-phase checkpoint (train work kept).", flush=True)
+            print("loading...", flush=True)
+            s1 = load_source(f"{args.train_dir}/train_source1.tsv")
+            s2 = load_source(f"{args.train_dir}/train_source2.tsv")
+            s3 = load_source(f"{args.train_dir}/train_source3.tsv")
+            if args.max_s23:
+                s2, s3 = _sampled_pool(s2, s3, gt, set(tr_ids) | set(val_ids),
+                                       args.max_s23, args.seed)
+            return do_val_stage(args, cfg, gt, s1, s2, s3, X, y, tr_ids, val_ids)
         print("no usable checkpoint; starting fresh.", flush=True)
     print("loading...", flush=True)
     s1 = load_source(f"{args.train_dir}/train_source1.tsv")
@@ -176,22 +254,8 @@ def main() -> None:
     print(f"S1 total={len(all_ids)} train={len(tr_ids)} val={len(val_ids)}", flush=True)
 
     if args.max_s23:
-        # Sampled pool for local iteration: keep every true match of the
-        # sampled S1s, fill the rest with random distractors.
-        keep_s1 = set(tr_ids) | val_ids
-        need: set[str] = set()
-        for sid in keep_s1:
-            need.update(gt.get(str(sid), set()))
-        s2_need = {i for i in need if i.startswith("S2-")}
-        s3_need = {i for i in need if i.startswith("S3-")}
-        half = args.max_s23 // 2
-        s2_extra = s2[~s2["entity_id"].isin(s2_need)].sample(
-            n=max(0, min(half - len(s2_need), len(s2))), random_state=args.seed)
-        s3_extra = s3[~s3["entity_id"].isin(s3_need)].sample(
-            n=max(0, min(half - len(s3_need), len(s3))), random_state=args.seed)
-        s2 = pd.concat([s2[s2["entity_id"].isin(s2_need)], s2_extra], ignore_index=True)
-        s3 = pd.concat([s3[s3["entity_id"].isin(s3_need)], s3_extra], ignore_index=True)
-        print(f"sampled pool S2={len(s2)} S3={len(s3)}", flush=True)
+        s2, s3 = _sampled_pool(s2, s3, gt, set(tr_ids) | val_ids,
+                               args.max_s23, args.seed)
 
     print("blocking train...", flush=True)
     s1tr = s1[s1["entity_id"].isin(set(tr_ids))]
@@ -203,19 +267,9 @@ def main() -> None:
 
     X, y, _ = build_rows(s1, s2, s3, gt, cand_tr, list(tr_ids))
     print(f"pairs={len(y)} pos_rate={y.mean() if len(y) else 0:.4f}", flush=True)
+    save_train_ckpt(args.out, cfg, X, y, np.array(tr_ids), set(val_ids))
 
-    print("blocking val + scoring...", flush=True)
-    s1v = s1[s1["entity_id"].isin(val_ids)]
-    cand_v = block_all(s1v, s2, s3, top_k=args.top_k,
-                       max_features=args.max_features, min_df=args.min_df,
-                       chunk_size=args.block_chunk,
-                       use_zip_block=args.use_zip_block, zip_cap=args.zip_cap)
-    print(f"val blocking recall={blocking_recall(cand_v, gt):.4f}", flush=True)
-    Xv, yv, infov = build_rows(s1, s2, s3, gt, cand_v, list(val_ids))
-
-    save_ckpt(args.out, cfg, X, y, Xv, yv, infov,
-              np.array(tr_ids), set(val_ids))
-    return train_and_score(args, gt, X, y, Xv, yv, infov, tr_ids, val_ids)
+    return do_val_stage(args, cfg, gt, s1, s2, s3, X, y, tr_ids, val_ids)
 
 
 def train_and_score(args, gt, X, y, Xv, yv, infov, tr_ids, val_ids) -> None:

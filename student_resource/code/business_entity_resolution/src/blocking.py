@@ -19,6 +19,22 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from .common import add_block_text
 from .text_norm import extract_zip
 
+try:
+    import resource
+
+    def _peak_gb() -> float:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # Linux KB
+except ImportError:  # macOS reports bytes; Windows lacks resource
+    import os
+
+    def _peak_gb() -> float:
+        try:
+            import resource as _r
+            scale = 1e9 if os.uname().sysname == "Darwin" else 1e6
+            return _r.getrusage(_r.RUSAGE_SELF).ru_maxrss / scale
+        except Exception:
+            return -1.0
+
 
 def _topk_per_row(scores: csr_matrix, k: int) -> tuple[np.ndarray, np.ndarray]:
     """Return (indices, scores) of top-k per row. Zero-score rows give nothing."""
@@ -77,7 +93,8 @@ def query_topk(vec, mat, cand_ids: np.ndarray, query_ids: np.ndarray,
             rate = done / el if el > 0 else 0
             print(f"[block:{shard_name}] chunk {ci+1}/{n_chunks}: "
                   f"{done}/{len(queries)} queries, {time.time()-ct0:.0f}s "
-                  f"({rate:.0f} q/s, {el:.0f}s elapsed)", flush=True)
+                  f"({rate:.0f} q/s, {el:.0f}s elapsed, peak {_peak_gb():.1f}GB)",
+                  flush=True)
     return out
 
 
