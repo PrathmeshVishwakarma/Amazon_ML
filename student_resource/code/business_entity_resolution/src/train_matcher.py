@@ -124,12 +124,23 @@ def main() -> None:
     ap.add_argument("--block-chunk", type=int, default=20000,
                     help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM "
                          "boxes to bound the intermediate matrix.")
+    ap.add_argument("--use-zip-block", action="store_true",
+                    help="Union same-ZIP candidates with the TF-IDF shortlist.")
+    ap.add_argument("--zip-cap", type=int, default=200,
+                    help="Max candidates per ZIP in the ZIP-block pass.")
+    ap.add_argument("--train-countries", default="",
+                    help="Comma list to restrict train S1s (LOCO, e.g. 'US'). "
+                         "Empty = all.")
+    ap.add_argument("--val-countries", default="",
+                    help="Comma list to restrict val S1s (LOCO, e.g. 'India'). "
+                         "Empty = all.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     cfg = {k: getattr(args, k) for k in
            ("top_k", "val_size", "max_train_s1", "max_s23",
-            "max_features", "min_df", "seed")}
+            "max_features", "min_df", "seed", "use_zip_block", "zip_cap",
+            "train_countries", "val_countries")}
     # Ground truth is small (IDs only) and needed for scoring even on resume.
     gt = load_ground_truth(f"{args.train_dir}/train_ground_truth.tsv")
     if args.resume:
@@ -154,6 +165,14 @@ def main() -> None:
     tr_ids = all_ids[args.val_size:]
     if args.max_train_s1:
         tr_ids = tr_ids[:args.max_train_s1]
+    # LOCO country filters (empty = all countries).
+    cmap_s1 = dict(zip(s1["entity_id"], s1["country"]))
+    if args.train_countries:
+        keep_c = set(args.train_countries.split(","))
+        tr_ids = np.array([i for i in tr_ids if cmap_s1.get(str(i)) in keep_c])
+    if args.val_countries:
+        keep_c = set(args.val_countries.split(","))
+        val_ids = {i for i in val_ids if cmap_s1.get(str(i)) in keep_c}
     print(f"S1 total={len(all_ids)} train={len(tr_ids)} val={len(val_ids)}", flush=True)
 
     if args.max_s23:
@@ -178,7 +197,8 @@ def main() -> None:
     s1tr = s1[s1["entity_id"].isin(set(tr_ids))]
     cand_tr = block_all(s1tr, s2, s3, top_k=args.top_k,
                         max_features=args.max_features, min_df=args.min_df,
-                        chunk_size=args.block_chunk)
+                        chunk_size=args.block_chunk,
+                        use_zip_block=args.use_zip_block, zip_cap=args.zip_cap)
     print(f"train blocking recall={blocking_recall(cand_tr, gt):.4f}", flush=True)
 
     X, y, _ = build_rows(s1, s2, s3, gt, cand_tr, list(tr_ids))
@@ -188,7 +208,8 @@ def main() -> None:
     s1v = s1[s1["entity_id"].isin(val_ids)]
     cand_v = block_all(s1v, s2, s3, top_k=args.top_k,
                        max_features=args.max_features, min_df=args.min_df,
-                       chunk_size=args.block_chunk)
+                       chunk_size=args.block_chunk,
+                       use_zip_block=args.use_zip_block, zip_cap=args.zip_cap)
     print(f"val blocking recall={blocking_recall(cand_v, gt):.4f}", flush=True)
     Xv, yv, infov = build_rows(s1, s2, s3, gt, cand_v, list(val_ids))
 

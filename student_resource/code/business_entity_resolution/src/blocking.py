@@ -17,6 +17,7 @@ from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from .common import add_block_text
+from .text_norm import extract_zip
 
 
 def _topk_per_row(scores: csr_matrix, k: int) -> tuple[np.ndarray, np.ndarray]:
@@ -80,6 +81,30 @@ def query_topk(vec, mat, cand_ids: np.ndarray, query_ids: np.ndarray,
     return out
 
 
+def zip_block(s1: pd.DataFrame, s23: pd.DataFrame,
+              cap: int = 200) -> dict[str, list[str]]:
+    """Same-ZIP candidate pass. Catches rebrands/typos TF-IDF misses.
+
+    Scoped to the given frames — callers pass same-country shards so a US
+    90210 never unions with a France 90210. ZIPs are exact strings, so US
+    5-digit and India 6-digit never cross-match either. Empty-ZIP records
+    are skipped. Per-ZIP cap bounds dense city ZIPs.
+    """
+    index: dict[str, list[str]] = {}
+    for eid, addr in zip(s23["entity_id"], s23["business_address"]):
+        z = extract_zip(addr)
+        if not z:
+            continue
+        lst = index.setdefault(z, [])
+        if len(lst) < cap:
+            lst.append(str(eid))
+    out: dict[str, list[str]] = {}
+    for sid, addr in zip(s1["entity_id"], s1["business_address"]):
+        z = extract_zip(addr)
+        out[str(sid)] = list(index.get(z, ())) if z else []
+    return out
+
+
 def block_shard(
     s1: pd.DataFrame,
     s23: pd.DataFrame,
@@ -120,8 +145,14 @@ def block_all(
     chunk_size: int = 20000,
     max_features: int = 300_000,
     min_df: int = 2,
+    use_zip_block: bool = False,
+    zip_cap: int = 200,
 ) -> dict[str, list[tuple[str, float]]]:
-    """Country-sharded blocking over S2+S3. Covers every S1 id (empty if none)."""
+    """Country-sharded blocking over S2+S3. Covers every S1 id (empty if none).
+
+    With use_zip_block, same-ZIP candidates (score 0.0 — the matcher re-scores
+    everything) are unioned with the TF-IDF shortlist per country shard.
+    """
     s23 = pd.concat([s2, s3], ignore_index=True)
     result: dict[str, list[tuple[str, float]]] = {}
     for country, g1 in s1.groupby("country", sort=False):
@@ -134,6 +165,18 @@ def block_all(
         shard = block_shard(g1, pool, top_k=top_k, chunk_size=chunk_size,
                             max_features=max_features, min_df=min_df,
                             shard_name=str(country))
+        if use_zip_block:
+            zb = zip_block(g1, pool, cap=zip_cap)
+            n_extra = 0
+            for sid, pairs in shard.items():
+                seen = {c for c, _ in pairs}
+                for cid in zb.get(sid, ()):
+                    if cid not in seen:
+                        pairs.append((cid, 0.0))
+                        seen.add(cid)
+                        n_extra += 1
+            print(f"[block:{country}] zip-union added {n_extra} candidates",
+                  flush=True)
         result.update(shard)
     return result
 

@@ -39,8 +39,7 @@ LEGAL_TOKENS = frozenset({
 # --- Street-type / directional abbreviations -> canonical form ---------------
 ADDR_ABBREV = {
     "rd": "road", "st": "street", "ave": "avenue", "av": "avenue",
-    "blvd": "boulevard", "dr": "drive", "ln": "lane", "ct": "court",
-    "hwy": "highway", "pkwy": "parkway", "pl": "place", "sq": "square",
+    "blvd": "boulevard", "bd": "boulevard", "dr": "drive", "ln": "lane", "ct": "court",    "hwy": "highway", "pkwy": "parkway", "pl": "place", "sq": "square",
     "ter": "terrace", "terr": "terrace", "cir": "circle", "apt": "apartment",
     "ste": "suite", "bldg": "building", "flr": "floor", "fl": "floor",
     "n": "north", "s": "south", "e": "east", "w": "west",
@@ -50,6 +49,7 @@ ADDR_ABBREV = {
     "mkt": "market", "nagar": "nagar", "colony": "colony", "sector": "sector",
     "h no": "house", "hno": "house", "ho": "house", "shop": "shop",
     "complex": "complex", "tower": "tower", "towers": "tower",
+    "rte": "route", "route": "route",
     "block": "block", "phase": "phase", "floor": "floor", "room": "room",
     "village": "village", "post": "post", "district": "district",
     "distt": "district", "dist": "district", "tal": "taluka",

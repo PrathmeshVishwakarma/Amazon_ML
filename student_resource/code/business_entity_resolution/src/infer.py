@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-from .blocking import fit_index, query_topk
+from .blocking import fit_index, query_topk, zip_block
 from .common import add_block_text, load_source
 from .features import pair_features
 
@@ -45,6 +45,10 @@ def main() -> None:
                     help="TF-IDF min document frequency. Raise (e.g. 5) on low-RAM boxes.")
     ap.add_argument("--block-chunk", type=int, default=20000,
                     help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM boxes.")
+    ap.add_argument("--use-zip-block", action="store_true",
+                    help="Union same-ZIP candidates with the TF-IDF shortlist.")
+    ap.add_argument("--zip-cap", type=int, default=200,
+                    help="Max candidates per ZIP in the ZIP-block pass.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -79,12 +83,22 @@ def main() -> None:
             continue
         cand_ids = pool["entity_id"].to_numpy()
         g1 = add_block_text(g1)
+        zb_all: dict[str, list[str]] = {}
+        if args.use_zip_block:
+            zb_all = zip_block(g1, pool, cap=args.zip_cap)
         for start in range(0, len(g1), args.chunk_s1):
             sub = g1.iloc[start:start + args.chunk_s1]
             print(f"[infer:{country}] block+score {start}/{len(g1)}...", flush=True)
             cand = query_topk(vec, mat, cand_ids, sub["entity_id"].to_numpy(),
                               sub["_block"].tolist(), args.top_k,
                               args.block_chunk, True, str(country))
+            if args.use_zip_block:
+                for sid, pairs in cand.items():
+                    seen = {c for c, _ in pairs}
+                    for cid in zb_all.get(sid, ()):
+                        if cid not in seen:
+                            pairs.append((cid, 0.0))
+                            seen.add(cid)
             for sid in sub["entity_id"]:
                 cand_rows[str(sid)] = [c for c, _ in cand.get(str(sid), [])]
             s1map = {r.entity_id: r for r in sub.itertuples()}
