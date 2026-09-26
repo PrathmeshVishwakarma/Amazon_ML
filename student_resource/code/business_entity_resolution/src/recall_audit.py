@@ -54,6 +54,7 @@ def main() -> None:
     s23 = pd.concat([s2, s3], ignore_index=True)
 
     full: dict[str, list[tuple[str, float]]] = {}
+    zip_all: dict[str, list[str]] = {}
     for country, g1 in sample.groupby("country", sort=False):
         pool = s23[s23["country"] == country]
         pool = pool if len(pool) else s23
@@ -68,20 +69,27 @@ def main() -> None:
         res = query_topk(vec, mat, pool_b["entity_id"].to_numpy(),
                          g1b["entity_id"].to_numpy(), g1b["_block"].tolist(),
                          k_max, args.block_chunk, True, f"audit-{country}")
-        if args.use_zip_block:
-            zb = zip_block(g1, pool, cap=args.zip_cap)
-            for sid, pairs in res.items():
-                seen = {c for c, _ in pairs}
-                for cid in zb.get(sid, ()):
-                    if cid not in seen:
-                        pairs.append((cid, 0.0))
-                        seen.add(cid)
         full.update(res)
+        if args.use_zip_block:
+            # Kept SEPARATE from the TF-IDF list: union happens after
+            # per-k truncation below (appending here would put ZIP picks
+            # past the slice point and silently drop them).
+            for sid, cids in zip_block(g1, pool, cap=args.zip_cap).items():
+                zip_all[sid] = list(dict.fromkeys(cids))
         del vec, mat, res
 
     print(f"{'top_k':>6} {'recall':>8} {'avg_pairs':>10}", flush=True)
     for k in ks:
-        trunc = {sid: pairs[:k] for sid, pairs in full.items()}
+        trunc: dict[str, list[tuple[str, float]]] = {}
+        for sid, pairs in full.items():
+            base = list(pairs[:k])
+            if args.use_zip_block:
+                seen = {c for c, _ in base}
+                for cid in zip_all.get(sid, ()):
+                    if cid not in seen:
+                        base.append((cid, 0.0))
+                        seen.add(cid)
+            trunc[sid] = base
         r = blocking_recall(trunc, gt)
         avg = sum(len(v) for v in trunc.values()) / max(len(trunc), 1)
         print(f"{k:>6} {r:>8.4f} {avg:>10.1f}", flush=True)
