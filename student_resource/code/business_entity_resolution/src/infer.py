@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-from .blocking import block_all
-from .common import load_source
+from .blocking import fit_index, query_topk
+from .common import add_block_text, load_source
 from .features import pair_features
 
 
@@ -60,36 +60,53 @@ def main() -> None:
     cand_rows: dict[str, list[str]] = {}
     match_rows: dict[str, list[str]] = {}
 
-    for start in range(0, len(s1), args.chunk_s1):
-        chunk = s1.iloc[start:start + args.chunk_s1]
-        print(f"block+score {start}/{len(s1)}...", flush=True)
-        cand = block_all(chunk, s2, s3, top_k=args.top_k,
-                           max_features=args.max_features, min_df=args.min_df,
-                           chunk_size=args.block_chunk)
-        for sid in chunk["entity_id"]:
-            pairs = cand.get(str(sid), [])
-            cand_rows[str(sid)] = [c for c, _ in pairs]
-        # Featurize + score this chunk's candidates.
-        s1map = {r.entity_id: r for r in chunk.itertuples()}
-        Xs, keys = [], []
-        for sid, pairs in cand.items():
-            srow = s1map.get(sid)
-            for cid, tscore in pairs:
-                crow = cmap.get(cid)
-                if crow is None:
-                    continue
-                Xs.append(pair_features(
-                    srow.business_name, srow.business_address, srow.country,
-                    crow.business_name, crow.business_address, crow.country, tscore))
-                keys.append((sid, cid))
-        if Xs:
-            probs = model.predict(np.array(Xs, dtype=np.float32))
-            for (sid, cid), p in zip(keys, probs):
-                if float(p) >= args.threshold:
-                    match_rows.setdefault(sid, []).append(cid)
-        for sid in chunk["entity_id"]:
-            match_rows.setdefault(str(sid), [])
-            cand_rows.setdefault(str(sid), [])
+    # One index build per country, then stream that country's S1s through it.
+    # (Previously the index was rebuilt for every S1 chunk — same results,
+    # ~10x slower on full-scale data.)
+    for country, g1 in s1.groupby("country", sort=False):
+        g23 = s23[s23["country"] == country]
+        pool = g23 if len(g23) else s23
+        print(f"[infer] country={country!r}: {len(g1)} queries vs "
+              f"{len(pool)} candidates", flush=True)
+        pool = add_block_text(pool)
+        try:
+            vec, mat = fit_index(pool["_block"].tolist(),
+                                 args.max_features, args.min_df)
+        except ValueError:
+            for sid in g1["entity_id"]:
+                cand_rows[str(sid)] = []
+                match_rows[str(sid)] = []
+            continue
+        cand_ids = pool["entity_id"].to_numpy()
+        g1 = add_block_text(g1)
+        for start in range(0, len(g1), args.chunk_s1):
+            sub = g1.iloc[start:start + args.chunk_s1]
+            print(f"[infer:{country}] block+score {start}/{len(g1)}...", flush=True)
+            cand = query_topk(vec, mat, cand_ids, sub["entity_id"].to_numpy(),
+                              sub["_block"].tolist(), args.top_k,
+                              args.block_chunk, True, str(country))
+            for sid in sub["entity_id"]:
+                cand_rows[str(sid)] = [c for c, _ in cand.get(str(sid), [])]
+            s1map = {r.entity_id: r for r in sub.itertuples()}
+            Xs, keys = [], []
+            for sid, pairs in cand.items():
+                srow = s1map.get(sid)
+                for cid, tscore in pairs:
+                    crow = cmap.get(cid)
+                    if crow is None:
+                        continue
+                    Xs.append(pair_features(
+                        srow.business_name, srow.business_address, srow.country,
+                        crow.business_name, crow.business_address, crow.country, tscore))
+                    keys.append((sid, cid))
+            if Xs:
+                probs = model.predict(np.array(Xs, dtype=np.float32))
+                for (sid, cid), p in zip(keys, probs):
+                    if float(p) >= args.threshold:
+                        match_rows.setdefault(sid, []).append(cid)
+            for sid in sub["entity_id"]:
+                match_rows.setdefault(str(sid), [])
+                cand_rows.setdefault(str(sid), [])
 
     write_tsv(f"{args.out}/candidate_pairs.tsv",
               "source1_entity_id\tcandidate_entity_ids", cand_rows, all_ids)

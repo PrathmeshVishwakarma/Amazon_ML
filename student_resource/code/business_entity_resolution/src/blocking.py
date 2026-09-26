@@ -38,6 +38,48 @@ def _topk_per_row(scores: csr_matrix, k: int) -> tuple[np.ndarray, np.ndarray]:
     return idx_out, sco_out
 
 
+def fit_index(texts: list[str], max_features: int, min_df: int):
+    """Fit a TF-IDF index (float32). Raises ValueError on empty vocabulary."""
+    vec = TfidfVectorizer(
+        analyzer="word", ngram_range=(1, 2), min_df=min_df,
+        max_features=max_features, sublinear_tf=True,
+    )
+    mat = vec.fit_transform(texts).astype(np.float32)
+    if mat.shape[1] == 0:
+        raise ValueError("empty vocabulary")
+    return vec, mat
+
+
+def query_topk(vec, mat, cand_ids: np.ndarray, query_ids: np.ndarray,
+               queries: list[str], top_k: int, chunk_size: int,
+               verbose: bool = True, shard_name: str = "") -> dict[str, list[tuple[str, float]]]:
+    """Stream queries against a fitted index in bounded-memory chunks."""
+    out: dict[str, list[tuple[str, float]]] = {str(sid): [] for sid in query_ids}
+    t0 = time.time()
+    n_chunks = (len(queries) + chunk_size - 1) // chunk_size
+    for ci, start in enumerate(range(0, len(queries), chunk_size)):
+        ct0 = time.time()
+        chunk = vec.transform(queries[start:start + chunk_size]).astype(np.float32)
+        scores = (chunk @ mat.T).tocsr()
+        idx, sco = _topk_per_row(scores, top_k)
+        for j in range(idx.shape[0]):
+            pairs: list[tuple[str, float]] = []
+            for c, s in zip(idx[j], sco[j]):
+                if c < 0 or s <= 0:
+                    continue
+                pairs.append((str(cand_ids[c]), float(s)))
+            if pairs:
+                out[str(query_ids[start + j])] = pairs
+        if verbose:
+            done = min(start + chunk_size, len(queries))
+            el = time.time() - t0
+            rate = done / el if el > 0 else 0
+            print(f"[block:{shard_name}] chunk {ci+1}/{n_chunks}: "
+                  f"{done}/{len(queries)} queries, {time.time()-ct0:.0f}s "
+                  f"({rate:.0f} q/s, {el:.0f}s elapsed)", flush=True)
+    return out
+
+
 def block_shard(
     s1: pd.DataFrame,
     s23: pd.DataFrame,
@@ -58,44 +100,16 @@ def block_shard(
         return out
 
     t0 = time.time()
-    vec = TfidfVectorizer(
-        analyzer="word", ngram_range=(1, 2), min_df=min_df,
-        max_features=max_features, sublinear_tf=True,
-    )
     try:
-        s23_mat = vec.fit_transform(s23["_block"].tolist()).astype(np.float32)
+        vec, s23_mat = fit_index(s23["_block"].tolist(), max_features, min_df)
     except ValueError:
         return out  # empty vocabulary
-    if s23_mat.shape[1] == 0:
-        return out
     if verbose:
         print(f"[block:{shard_name}] index built: {len(s23)} docs, "
               f"{s23_mat.shape[1]} terms, {time.time()-t0:.0f}s", flush=True)
 
-    s1_ids = s1["entity_id"].to_numpy()
-    blocks = s1["_block"].tolist()
-    n_chunks = (len(blocks) + chunk_size - 1) // chunk_size
-    for ci, start in enumerate(range(0, len(blocks), chunk_size)):
-        ct0 = time.time()
-        chunk = vec.transform(blocks[start:start + chunk_size]).astype(np.float32)
-        scores = (chunk @ s23_mat.T).tocsr()
-        idx, sco = _topk_per_row(scores, top_k)
-        for j in range(idx.shape[0]):
-            pairs: list[tuple[str, float]] = []
-            for c, s in zip(idx[j], sco[j]):
-                if c < 0 or s <= 0:
-                    continue
-                pairs.append((str(cand_ids[c]), float(s)))
-            if pairs:
-                out[str(s1_ids[start + j])] = pairs
-        if verbose:
-            done = min(start + chunk_size, len(blocks))
-            el = time.time() - t0
-            rate = done / el if el > 0 else 0
-            print(f"[block:{shard_name}] chunk {ci+1}/{n_chunks}: "
-                  f"{done}/{len(blocks)} queries, {time.time()-ct0:.0f}s "
-                  f"({rate:.0f} q/s, {el:.0f}s elapsed)", flush=True)
-    return out
+    return query_topk(vec, s23_mat, cand_ids, s1["entity_id"].to_numpy(),
+                      s1["_block"].tolist(), top_k, chunk_size, verbose, shard_name)
 
 
 def block_all(
