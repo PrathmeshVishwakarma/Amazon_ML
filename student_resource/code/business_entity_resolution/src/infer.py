@@ -43,8 +43,9 @@ def main() -> None:
                     help="TF-IDF vocab cap. Lower (e.g. 50000) to fit low-RAM boxes.")
     ap.add_argument("--min-df", type=int, default=2,
                     help="TF-IDF min document frequency. Raise (e.g. 5) on low-RAM boxes.")
-    ap.add_argument("--block-chunk", type=int, default=20000,
-                    help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM boxes.")
+    ap.add_argument("--block-chunk", type=int, default=2000,
+                    help="Queries per sparse multiply. Lower (e.g. 1000) if a "
+                         "full-vocab shard still OOMs.")
     ap.add_argument("--use-zip-block", action="store_true",
                     help="Union same-ZIP candidates with the TF-IDF shortlist.")
     ap.add_argument("--zip-cap", type=int, default=200,

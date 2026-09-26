@@ -121,9 +121,9 @@ def main() -> None:
                          "e.g. after a crash or shutdown. Flags must match.")
     ap.add_argument("--log-every", type=int, default=50,
                     help="Print training logloss every N boosting rounds.")
-    ap.add_argument("--block-chunk", type=int, default=20000,
-                    help="Queries per sparse multiply. Lower (e.g. 2000) on low-RAM "
-                         "boxes to bound the intermediate matrix.")
+    ap.add_argument("--block-chunk", type=int, default=2000,
+                    help="Queries per sparse multiply. Lower (e.g. 1000) if a "
+                         "full-vocab shard still OOMs.")
     ap.add_argument("--use-zip-block", action="store_true",
                     help="Union same-ZIP candidates with the TF-IDF shortlist.")
     ap.add_argument("--zip-cap", type=int, default=200,
