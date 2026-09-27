@@ -154,7 +154,25 @@ def _w_run(payload) -> tuple[dict, dict]:
     s1map = {r[0]: r for r in sub_rows}
     cand_rows: dict[str, list[str]] = {}
     match_rows: dict[str, list[str]] = {}
+    # Sub-batched featurize+predict: a whole slice's pairs as one Python
+    # float list transiently costs GBs per worker and OOMs multi-worker
+    # runs at startup spikes. Flushing every batch caps it at ~100MB.
+    FEAT_BATCH = 200_000
     Xs, keys = [], []
+
+    def _flush() -> None:
+        if not keys:
+            return
+        arr = np.array(Xs, dtype=np.float32)
+        del Xs[:]
+        probs = model.predict(arr)
+        del arr
+        thr = W["threshold"]
+        for (sid, cid), p in zip(keys, probs):
+            if float(p) >= thr:
+                match_rows.setdefault(sid, []).append(cid)
+        keys.clear()
+
     for sid, pairs in cand.items():
         cand_rows[sid] = [c for c, _ in pairs]
         srow = s1map.get(sid)
@@ -166,11 +184,9 @@ def _w_run(payload) -> tuple[dict, dict]:
                 srow[1], srow[2], srow[3],
                 crow.business_name, crow.business_address, crow.country, tscore))
             keys.append((sid, cid))
-    if Xs:
-        probs = model.predict(np.array(Xs, dtype=np.float32))
-        for (sid, cid), p in zip(keys, probs):
-            if float(p) >= W["threshold"]:
-                match_rows.setdefault(sid, []).append(cid)
+            if len(keys) >= FEAT_BATCH:
+                _flush()
+    _flush()
     return cand_rows, match_rows
 
 
