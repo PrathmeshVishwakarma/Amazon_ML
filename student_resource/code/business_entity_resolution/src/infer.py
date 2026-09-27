@@ -226,6 +226,11 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true",
                     help="Skip countries with finished part files in --out "
                          "(crash-safe reruns). Flags must match.")
+    ap.add_argument("--countries", default="",
+                    help="Comma list to process only these S1 countries "
+                         "(e.g. 'India' for a split run). Empty = all. "
+                         "Finals then cover only those S1s; mergeable via "
+                         "merge_parts.py using the part files.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -244,6 +249,10 @@ def main() -> None:
     s1 = load_source(f"{args.test_dir}/test_source1.tsv")
     s2 = load_source(f"{args.test_dir}/test_source2.tsv")
     s3 = load_source(f"{args.test_dir}/test_source3.tsv")
+    if args.countries:
+        only = set(args.countries.split(","))
+        s1 = s1[s1["country"].isin(only)].reset_index(drop=True)
+        print(f"country filter {sorted(only)}: {len(s1)} S1s", flush=True)
     s23 = pd.concat([s2, s3], ignore_index=True)
     cmap = {r.entity_id: r for r in s23.itertuples()}
     if args.jobs > 1:
