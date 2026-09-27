@@ -39,6 +39,13 @@ def main() -> None:
                     help="Output dirs holding .part_* files (own + friend's).")
     ap.add_argument("--test-dir", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--empty-countries", default="",
+                    help="DEADLINE FALLBACK only: S1s in these countries (comma "
+                         "list, e.g. 'India') with no part coverage are emitted "
+                         "as explicit abstentions (empty lists) instead of "
+                         "erroring. Use when a shard cannot finish before a "
+                         "hard cutoff; scores ~singleton-rate on those rows "
+                         "instead of invalidating the whole submission.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -63,7 +70,22 @@ def main() -> None:
 
     missing = [sid for sid in all_ids if sid not in cand]
     if missing:
-        raise ValueError(f"{len(missing)} S1s uncovered, e.g. {missing[:3]}")
+        if args.empty_countries:
+            cmap = dict(zip(s1["entity_id"], s1["country"]))
+            fill_c = set(args.empty_countries.split(","))
+            fillable = [sid for sid in missing if cmap.get(sid) in fill_c]
+            rest = [sid for sid in missing if cmap.get(sid) not in fill_c]
+            if rest:
+                raise ValueError(
+                    f"{len(rest)} S1s uncovered outside --empty-countries, "
+                    f"e.g. {rest[:3]}")
+            for sid in fillable:
+                cand[sid] = []
+                match[sid] = []
+            print(f"abstentions emitted for {len(fillable)} S1s "
+                  f"in {sorted(fill_c)} (deadline fallback)", flush=True)
+        else:
+            raise ValueError(f"{len(missing)} S1s uncovered, e.g. {missing[:3]}")
     extra = set(cand) - set(all_ids)
     if extra:
         raise ValueError(f"{len(extra)} part S1s not in test S1, e.g. {list(extra)[:3]}")
