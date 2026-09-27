@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import multiprocessing as mp
 import os
 import numpy as np
@@ -72,6 +73,56 @@ def write_tsv(path: str, header: str, rows: dict[str, list[str]], all_ids: list[
         for sid in all_ids:
             ids = sorted(set(rows.get(sid, [])))
             f.write(f"{sid}\t{','.join(ids)}\n")
+
+
+def _safe_country(country: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in str(country))
+
+
+def _parts_cfg(out: str) -> str:
+    return os.path.join(out, ".parts_config.json")
+
+
+def _part_paths(out: str, country: str) -> tuple[str, str]:
+    s = _safe_country(country)
+    return (os.path.join(out, f".part_{s}_cand.tsv"),
+            os.path.join(out, f".part_{s}_match.tsv"))
+
+
+def write_part(out: str, country: str, ids: list[str],
+               cand_rows: dict[str, list[str]],
+               match_rows: dict[str, list[str]]) -> None:
+    """Flush one finished country's rows to part files (crash-safe)."""
+    pc, pm = _part_paths(out, country)
+    with open(pc, "w") as f:
+        for sid in ids:
+            f.write(f"{sid}\t{','.join(sorted(set(cand_rows.get(sid, []))))}\n")
+    with open(pm, "w") as f:
+        for sid in ids:
+            f.write(f"{sid}\t{','.join(sorted(set(match_rows.get(sid, []))))}\n")
+    print(f"[infer:{country}] part files flushed ({len(ids)} S1s)", flush=True)
+
+
+def load_part(out: str, country: str,
+              cand_rows: dict[str, list[str]],
+              match_rows: dict[str, list[str]]) -> list[str]:
+    """Load a finished country's part files. Returns its S1 ids ( [] if absent)."""
+    pc, pm = _part_paths(out, country)
+    if not (os.path.exists(pc) and os.path.exists(pm)):
+        return []
+    ids: list[str] = []
+    with open(pc) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            sid, _, rest = line.partition("\t")
+            cand_rows[sid] = rest.split(",") if rest else []
+            ids.append(sid)
+    with open(pm) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            sid, _, rest = line.partition("\t")
+            match_rows[sid] = rest.split(",") if rest else []
+    return ids
 
 
 def _w_run(payload) -> tuple[dict, dict]:
@@ -147,9 +198,23 @@ def main() -> None:
                     help="Union same-ZIP candidates with the TF-IDF shortlist.")
     ap.add_argument("--zip-cap", type=int, default=200,
                     help="Max candidates per ZIP in the ZIP-block pass.")
+    ap.add_argument("--resume", action="store_true",
+                    help="Skip countries with finished part files in --out "
+                         "(crash-safe reruns). Flags must match.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    cfg = {k: getattr(args, k) for k in
+           ("top_k", "threshold", "max_features", "min_df",
+            "use_zip_block", "zip_cap", "model")}
+    if args.resume and os.path.exists(_parts_cfg(args.out)):
+        with open(_parts_cfg(args.out)) as f:
+            if json.load(f) != cfg:
+                print("part-file config differs from current flags; "
+                      "ignoring parts and starting fresh.", flush=True)
+                args.resume = False
+    with open(_parts_cfg(args.out), "w") as f:
+        json.dump(cfg, f, sort_keys=True)
     print("loading test...", flush=True)
     s1 = load_source(f"{args.test_dir}/test_source1.tsv")
     s2 = load_source(f"{args.test_dir}/test_source2.tsv")
@@ -176,6 +241,13 @@ def main() -> None:
     # (Previously the index was rebuilt for every S1 chunk — same results,
     # ~10x slower on full-scale data.)
     for country, g1 in s1.groupby("country", sort=False):
+        g1_ids = [str(sid) for sid in g1["entity_id"].tolist()]
+        if args.resume:
+            loaded = load_part(args.out, str(country), cand_rows, match_rows)
+            if loaded:
+                print(f"[infer:{country}] resumed {len(loaded)} S1s from part files",
+                      flush=True)
+                continue
         g23 = s23[s23["country"] == country]
         pool = g23 if len(g23) else s23
         print(f"[infer] country={country!r}: {len(g1)} queries vs "
@@ -188,6 +260,7 @@ def main() -> None:
             for sid in g1["entity_id"]:
                 cand_rows[str(sid)] = []
                 match_rows[str(sid)] = []
+            write_part(args.out, str(country), g1_ids, cand_rows, match_rows)
             continue
         cand_ids = pool["entity_id"].to_numpy()
         g1 = add_block_text(g1)
@@ -197,6 +270,9 @@ def main() -> None:
         if args.jobs > 1:
             _run_parallel(country, g1, vec, mat, cand_ids, zb_all, cmap,
                           args.model, args, cand_rows, match_rows)
+            write_part(args.out, str(country), g1_ids, cand_rows, match_rows)
+            # Release the shard index promptly; peak RSS stays bounded.
+            del vec, mat
             continue
         for start in range(0, len(g1), args.chunk_s1):
             sub = g1.iloc[start:start + args.chunk_s1]
@@ -233,6 +309,9 @@ def main() -> None:
             for sid in sub["entity_id"]:
                 match_rows.setdefault(str(sid), [])
                 cand_rows.setdefault(str(sid), [])
+
+        write_part(args.out, str(country), g1_ids, cand_rows, match_rows)
+        del vec, mat
 
     write_tsv(f"{args.out}/candidate_pairs.tsv",
               "source1_entity_id\tcandidate_entity_ids", cand_rows, all_ids)
