@@ -31,7 +31,6 @@ _W: dict = {}
 def _run_parallel(country, g1, vec, mat, cand_ids, zb_all, cmap, model_path,
                   args, cand_rows, match_rows) -> None:
     """Split one country's S1s across fork workers sharing the index/model."""
-    """Split one country's S1s across fork workers sharing the index/model."""
     import numpy as np
 
     ids = g1["entity_id"].tolist()
@@ -41,12 +40,13 @@ def _run_parallel(country, g1, vec, mat, cand_ids, zb_all, cmap, model_path,
     n = max(1, min(args.jobs, len(ids)))
     bounds = np.array_split(np.arange(len(ids)), n)
     payloads = []
-    for b in bounds:
+    for si, b in enumerate(bounds):
         b = b.tolist()
         payloads.append(([ids[i] for i in b], [blocks[i] for i in b],
                          [rows[i] for i in b],
                          {sid: zb_all[sid] for sid in (ids[i] for i in b)
-                          if sid in zb_all} if args.use_zip_block else {}))
+                          if sid in zb_all} if args.use_zip_block else {},
+                         f"s{si + 1}"))
     # Publish shared state BEFORE forking: children inherit it copy-on-write,
     # no pickling of the GB-scale index. The model travels as a PATH and is
     # loaded inside workers (post-fork) to avoid OpenMP fork deadlock.
@@ -139,10 +139,11 @@ def _w_run(payload) -> tuple[dict, dict]:
         import lightgbm as lgb
 
         W["model"] = lgb.Booster(model_file=W["model_path"])
-    sub_ids, sub_blocks, sub_rows, zb_slice = payload
-    W = _W
+    sub_ids, sub_blocks, sub_rows, zb_slice, slice_tag = payload
+    tag = f"{W['shard']}/{slice_tag}"
+    print(f"[infer:{tag}] worker started ({len(sub_ids)} S1s)", flush=True)
     cand = query_topk(W["vec"], W["mat"], W["cand_ids"], np.array(sub_ids),
-                      sub_blocks, W["top_k"], W["block_chunk"], False, W["shard"])
+                      sub_blocks, W["top_k"], W["block_chunk"], True, tag)
     if W["use_zip"]:
         for sid, pairs in cand.items():
             seen = {c for c, _ in pairs}
@@ -173,6 +174,8 @@ def _w_run(payload) -> tuple[dict, dict]:
                 match_rows.setdefault(sid, []).append(cid)
         keys.clear()
 
+    total_pairs = sum(len(p) for p in cand.values())
+    n_feat = 0
     for sid, pairs in cand.items():
         cand_rows[sid] = [c for c, _ in pairs]
         srow = s1map.get(sid)
@@ -186,7 +189,13 @@ def _w_run(payload) -> tuple[dict, dict]:
             keys.append((sid, cid))
             if len(keys) >= FEAT_BATCH:
                 _flush()
+            n_feat += 1
+            if n_feat % 1_000_000 == 0:
+                print(f"[infer:{tag}] featurized {n_feat}/{total_pairs} pairs",
+                      flush=True)
     _flush()
+    print(f"[infer:{tag}] scored ({len(cand_rows)} S1s, "
+          f"{sum(len(v) for v in match_rows.values())} matches)", flush=True)
     return cand_rows, match_rows
 
 
