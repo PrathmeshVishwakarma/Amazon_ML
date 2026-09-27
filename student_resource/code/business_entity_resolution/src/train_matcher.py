@@ -287,7 +287,8 @@ def train_and_score(args, gt, X, y, Xv, yv, infov, tr_ids, val_ids) -> None:
     ds = lgb.Dataset(Xtr, label=ytr, feature_name=FEATURE_NAMES)
     params = dict(objective="binary", metric="binary_logloss", learning_rate=0.05,
                   num_leaves=127, feature_fraction=0.9, bagging_fraction=0.9,
-                  bagging_freq=1, verbose=-1, num_threads=os.cpu_count() or 4)
+                  bagging_freq=1, verbose=-1, num_threads=os.cpu_count() or 4,
+                  seed=args.seed, deterministic=True)
     model = lgb.train(params, ds, num_boost_round=500,
                       callbacks=[lgb.log_evaluation(period=args.log_every)])
 
